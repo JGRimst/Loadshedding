@@ -1,0 +1,596 @@
+---
+title: "Sentiment2"
+author: "Hannah Quass"
+date: "2023-10-24"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidytext)
+library(stringr)
+library(lubridate)
+library(textdata)
+library(readxl)
+library(lemon)
+knit_print.data.frame <- lemon_print
+```
+
+# 1.1 Problem and data description - in report
+## 1.2 Data processing
+### 1.2.1 Data Preparation
+
+```{r echo=FALSE}
+houses1 <- read_excel("output.xlsx")
+numericals <- c("bedrooms", "bathrooms", "erf_size", "garages", "parkings")
+houses <- houses1 %>% select(-all_of(numericals))
+```
+
+
+- Tokenize and clean text data
+```{r echo=FALSE}
+replace_reg <- "[\t\r\n]"
+
+tidy_houses <- houses %>% 
+  mutate(description = str_replace_all(description, replace_reg, "")) %>% # remove tabs, newlines, etc.
+  unnest_tokens(word, description, token = "words") %>% # tokenize
+  filter(!word %in% stop_words$word, str_detect(word, "[a-z]")) # remove stop words
+```
+
+
+- Get sentiments using afinn sentiment lexicon
+```{r echo=FALSE}
+sentiments <- tidy_houses %>% 
+  left_join(get_sentiments("afinn")) %>% # add sentiments (-5 to 5)
+  mutate(sentiment = ifelse(is.na(value), 0, value)) %>% # Many sentiment values are 0!!
+  select(-value)
+
+
+original_sentiments <- sentiments %>%
+  group_by(id) %>%
+  summarize(old_sentiment = (sum(sentiment)))
+```
+### 1.2.2 Data Exploration
+
+```{r echo=FALSE}
+sentiments %>%
+  filter(sentiment > 0) %>%
+  count(word) %>%
+  arrange(desc(n)) %>%
+  filter(rank(desc(n)) <= 20) %>%
+  ggplot(aes(reorder(word,n),n)) + geom_col() + coord_flip() + xlab("") + ggtitle("20 most common positive words")
+```
+
+```{r, echo=FALSE}
+sentiments %>%
+  filter(sentiment < 0) %>%
+  count(word) %>%
+  arrange(desc(n)) %>%
+  filter(rank(desc(n)) <= 20) %>%
+  ggplot(aes(reorder(word,n),n)) + geom_col() + coord_flip() + xlab("") + ggtitle("Most common negative words")
+```
+
+#### Investigating individual negative words
+
+##### "Die"
+The negative word "die" being detected is actually from "Die Laan" and "Die Boord", two Afrikaans place names in Stellenbosch - we need to change it to have a neutral sentiment
+
+##### "Miss"
+The negative word "miss" is most often used in the context: "Don't miss the opportunity to own this amazing house"
+
+##### "Fire" and "alarm"
+The context of these words is describing a house that has a fire alarm!
+
+We need to change the sentiments of these words listed above to take their context into consideration in the analysis.
+
+```{r echo=FALSE}
+# Changing the sentiment of "Die", "fire", and "alarm" to be neutral
+sentiments <- sentiments %>%
+  mutate(sentiment = ifelse(word == "die", 0, sentiment))
+```
+
+```{r echo=FALSE}
+change <- c("fire", "alarm")
+
+sentiments <- sentiments %>%
+  mutate(sentiment = ifelse(word %in% change, 0, sentiment))
+```
+
+#### Investigating individual positive words
+##### And changing the sentiments of words not in the afinn lexicon
+Drawing a random sample of descriptions to read through, I found that there were many words that clearly had a positive sentiment that the afinn lexicon did not label as such.  I manually assigned sentiments to these words.  Some examples include:
+"sublime"
+"exquisite"
+"captivating"
+"quality"
+"luxury"
+etc.
+
+The assignment of these sentiment scores is clearly limited because of my subjective choices, but the subjective scores I defined still carry more meaning that a sentiment of zero would have.
+
+```{r echo=FALSE}
+# Manually change the sentiments of certain words not contained in the afinn lexicon
+sent2 <- c("bespoke", "quality", "balance", "special", "symphony", "prestigious")
+sent3 <- c("jaw dropping", "sublime", "showstopper", "incredible", "exceptional", "impressive")
+sent4 <- c("luxurious", "unparalleled", "exquisite", "impeccable", "captivating", "luxury", "epitome", " magnificent", "spectacular")
+
+sentiments <- sentiments %>%
+  mutate(sentiment = ifelse(word %in% sent2, 2, sentiment)) %>%
+  mutate(sentiment = ifelse(word %in% sent3, 3, sentiment)) %>%
+  mutate(sentiment = ifelse(word %in% sent4, 4, sentiment))
+```
+
+
+### 1.2.3 Sentiment negation
+
+```{r echo=FALSE, include=FALSE}
+# descriptions that contain the negative word "miss":
+miss_ids <- tidy_houses %>%
+  group_by(id) %>%
+  filter(word == "miss") %>%
+  select(id)
+
+miss_houses <- houses %>%
+  filter(id %in% miss_ids$id) %>%
+  select(id, description)
+head(miss_houses)
+```
+
+
+#### Observing use cases of the word "miss":
+
+15: Don't miss the opportunity ...
+23: Don't miss your chance...
+30: Don't miss out on this opportunity.
+48: Don't miss out on this amazing opportunity...
+271: Don't miss out on this incredible opportunity...
+
+So what we see is that the word "miss" preceded by the word "don't" is actually a negated bigram, and I need to account for it when doing sentiment negation.
+
+For sentiment negation the basic process was:
+
+- Tokenise the text data by bigrams
+```{r include=FALSE}
+# Tokenizing by bigrams to do sentiment negation
+bigrams_separated <- houses %>%
+  mutate(description = str_replace_all(description, replace_reg, "")) %>%
+  unnest_tokens(bigram, description, token = "ngrams", n = 2) %>%
+  separate(bigram, c("word1", "word2"), sep = " ")
+```
+
+- Get the sentiment of each word in the bigram
+```{r echo=FALSE}
+bigram_sentiments <- bigrams_separated %>% 
+    # add sentiment for word 1
+    left_join(get_sentiments("afinn"), by = c(word1 = "word")) %>%
+    rename(sentiment1 = value) %>%
+    mutate(sentiment1 = ifelse(is.na(sentiment1), 0, sentiment1)) %>%
+    
+    # add sentiment for word 2
+    left_join(get_sentiments("afinn"), by = c(word2 = "word")) %>%
+    rename(sentiment2 = value) %>%
+    mutate(sentiment2 = ifelse(is.na(sentiment2), 0, sentiment2))
+```
+
+- Change the sentiment of the second word in a bigram by multiplying by -1 if the first word in the bigram is a negation word
+```{r include=FALSE}
+# Change the sentiment of bigrams containing the word "miss":
+miss_sentiments <- bigram_sentiments %>% 
+  filter(word2 == "miss") %>%
+  # change sentiment of word2 to 0
+  mutate(sentiment2 = sentiment2 * -1)
+miss_sentiments <- miss_sentiments %>%
+  select(-word1, -sentiment1)
+```
+
+- Negation words used:
+"not"
+"never"
+"without"
+"can't"
+"won't"
+
+```{r include=FALSE}
+# Change the sentiment of negated bigrams
+negation_words <- c("not", "never", "without", "can't", "won't")
+
+# show a few
+filter(bigram_sentiments, word1 %in% negation_words) %>% 
+    head(50) %>% select(word1, word2, sentiment1, sentiment2) # for display purposes
+
+```
+
+
+```{r include=FALSE}
+# Flip the sentiment of the second word in a negated bigram
+bigrams_reversed <- bigram_sentiments %>%
+
+    # create a variable that is the opposite of sentiment2
+    mutate(opp_sentiment2 = (sentiment2 * -1)) %>%
+    
+    # reverse sentiment2 if word1 is a negation word
+    mutate(sentiment2 = ifelse(word1 %in% negation_words, opp_sentiment2, sentiment2)) %>%
+    
+    # remove the opposite sentiment variable, which we don't need any more
+    select(-opp_sentiment2)
+```
+
+
+#### Observe how the sentiments have changed after negation
+```{r echo=FALSE, caption="Sentiments after negation",render=lemon_print}
+bigrams_reversed %>%
+  filter(word1 %in% negation_words) %>%
+  filter(sentiment2 > 0)
+```
+
+
+- Finally, put the separated bigrams back together and update the sentiments of words that have been changed after negation.
+```{r include=FALSE}
+# Join the bigrams back together
+bigrams_done <- bigrams_reversed %>%
+  mutate(net_sentiment = (sentiment1) + (sentiment2)) %>%
+  unite(bigram, word1, word2, sep = " ", remove = FALSE)
+
+bigrams_done %>% filter(net_sentiment > 0) # display results
+```
+
+
+```{r include=FALSE}
+# Join the results of the sentiment negation back into the main sentiments tibble
+negated_ids <- bigrams_reversed %>%
+  filter(word1 %in% negation_words)
+```
+
+#### Comparing how aggregate sentiment has changed after negations and manually adjusting the sentiment of individual words
+```{r echo=FALSE}
+# Looking at the values of aggregated sentiment again for a sanity check
+
+new_sentiments <- sentiments %>%
+  group_by(id) %>%
+  summarize(new_sentiment = (sum(sentiment)))
+
+comparison <- tibble(
+  "id" = new_sentiments$id,
+  "old sentiment" = original_sentiments$old_sentiment,
+  "new sentiment" = new_sentiments$new_sentiment
+)
+```
+
+```{r echo=FALSE, caption="Change in aggregate sentiment after processing",render=lemon_print}
+head(comparison, n = 7)
+```
+
+We see that our basic sentiment analysis has significantly changed the aggregate sentiment of each house description.
+
+## 1.3 Modelling
+### 1.3.1 Developing features from the sentiments of house descriptions
+Predictors:
+- weighted aggregate sentiment
+- number of positive words per description
+- number of negative words per description
+- proportion of positive words per description
+- proportion of negative words per description
+
+```{r include=FALSE}
+# We will be building up the set of features in here:
+features <- tibble(id = houses$id)
+```
+
+
+```{r include=FALSE}
+sentiments_per_house <- sentiments %>%
+  group_by(id) %>%
+  summarize(net_sentiment = (sum(sentiment)))
+head(sentiments_per_house,n = 10)
+```
+
+
+```{r echo=FALSE}
+# Plotting aggregate sentiments
+hist(sentiments_per_house$net_sentiment, 
+     main = "Frequency of aggregate sentiment scores",
+     xlab = "Sentiment",
+     ylab = "Frequency",
+     col = "lightblue",
+     breaks = 30
+)
+
+```
+
+- Note that no descriptions have a negative aggregate sentiment
+
+Next we weight each house's sentiment score with the number of words in the description.
+```{r include=FALSE}
+# Weighting each house's sentiment score with the NUMBER OF WORDS in the description
+# Num words in description
+house_words <- houses %>%
+  unnest_tokens(word, description, "words") %>%
+  group_by(id) %>%
+  summarise(total_words = n())
+
+houses <- houses %>% mutate(description_length = house_words$total_words)
+```
+
+
+```{r}
+sentiments_per_house <- sentiments_per_house %>%
+  mutate(weighted_sentiment = (net_sentiment/houses$description_length))
+```
+
+
+```{r}
+hist(sentiments_per_house$weighted_sentiment, 
+     main = "Frequency of weighted aggregate sentiment scores",
+     xlab = "Sentiment",
+     ylab = "Frequency",
+     col = "lightblue",
+     breaks = 30
+)
+```
+
+
+```{r include=FALSE}
+# Add weighted sentiments to the features
+features <- features %>%
+  mutate(weighted_sentiment = sentiments_per_house$weighted_sentiment)
+```
+
+
+```{r include=FALSE}
+# Add the number of positive and negative words per house to the features
+pos <- sentiments %>%
+  mutate(positive = ifelse(sentiment > 0, TRUE, FALSE)) %>% # boolean for pos or neg sentiment of a WORD
+  group_by(id, positive) %>%
+  summarize(n = n()) %>% # number of positive words per house (id grouping)
+  filter(positive == TRUE) %>% # drop row of number of negative words per house
+  select(id, n) %>% # select only necessary columns
+  rename(num_pos_words = n)
+
+neg <- sentiments %>%
+  mutate(negative = ifelse(sentiment < 0, TRUE, FALSE)) %>%
+  group_by(id, negative) %>%
+  summarize(n = n()) %>%
+  filter(negative == TRUE) %>%
+  select(id, n) %>%
+  rename(num_neg_words = n)
+
+sentiments_summary <- tibble(id = 1:443)
+sentiments_summary <- sentiments_summary %>%
+  mutate(num_neg_words = ifelse(id %in% neg$id, neg$num_neg_words, 0)) %>%
+  mutate(num_pos_words = ifelse(id %in% pos$id, pos$num_pos_words, 0))
+
+```
+
+
+```{r include=FALSE}
+features <- features %>%
+  mutate(num_pos_words = sentiments_summary$num_pos_words, num_neg_words = sentiments_summary$num_neg_words)
+```
+
+
+```{r include=FALSE}
+# First convert price in houses to an integer
+houses <- houses %>%
+  mutate(price = gsub(",", "", price)) %>%
+  mutate(price = as.integer(price))
+```
+
+```{r include=FALSE}
+# Adding proportions of positive and negative words and price
+features <- features %>%
+  mutate(pos_proportion = num_pos_words/houses$description_length) %>%
+  mutate(neg_proportion = num_neg_words/houses$description_length) %>%
+  mutate(price = houses$price)
+```
+
+```{r include=FALSE}
+# Adding description length
+features <- features %>%
+  mutate(description_length = houses$description_length)
+```
+
+
+### Observing the correlations between variables
+```{r echo=FALSE}
+cors <- c(
+cor(features$price, features$num_pos_words),
+cor(features$price, features$num_neg_words),
+cor(features$price, features$pos_proportion),
+cor(features$price, features$neg_proportion),
+cor(features$price, features$weighted_sentiment),
+cor(features$price, features$description_length)
+)
+
+feature_names <- c("num_pos_words", "num_neg_words", "pos_proportion", "neg_proportion", "weighted_sentiment", "description_length")
+cors_tibble <- tibble("Feature name" = feature_names, 
+                      "correlation with price" = cors)
+```
+
+```{r echo=FALSE, caption="Correlation between price and features",render=lemon_print}
+cors_tibble
+```
+
+### Plotting the relationship between price and different sentiment predictors
+
+```{r echo=FALSE}
+# Plotting the relationship between price and weighted sentiment
+x = (features %>% filter(price != 125000000))$price
+y = (features %>% filter(price != 125000000))$weighted_sentiment
+
+plot(x, y, main = "Relationship between price and weighted sentiment", xlab = "Price", ylab = "Weighted Sentiment", col = "blue", pch = 20, xaxt = "n")
+#axis(1, at = pretty(x), labels = paste0(pretty(x) / 1000, "k"))
+axis(1, at = x, labels = x)
+```
+
+
+```{r echo=FALSE}
+# Plotting the relationship between price and number of positive and negative words
+layout(matrix(c(1, 2), nrow = 1, byrow = TRUE))
+
+x = (features %>% filter(price != 125000000))$price
+y = (features %>% filter(price != 125000000))$num_pos_words
+z = (features %>% filter(price != 125000000))$num_neg_words
+
+plot(x, y, main = "Price and no. positive words", xlab = "Price", ylab = "num_pos_words", col = "blue", pch = 20, xaxt = "n")
+axis(1, at = x, labels = x)
+
+plot(x, z, main = "Price and no. negative words", xlab = "Price", ylab = "num_neg_words", col = "blue", pch = 20, xaxt = "n")
+axis(1, at = x, labels = x)
+```
+
+
+```{r echo=FALSE}
+# Plotting the relationship between price and proportions of positive and negative words
+layout(matrix(c(1, 2), nrow = 1, byrow = TRUE))
+
+x = (features %>% filter(price != 125000000))$price
+y = (features %>% filter(price != 125000000))$pos_proportion
+z = (features %>% filter(price != 125000000))$neg_proportion
+
+plot(x, y, main = "Price and positive proportion", xlab = "Price", ylab = "pos_proportion", col = "blue", pch = 20, xaxt = "n")
+axis(1, at = x, labels = x)
+
+plot(x, z, main = "Price and negative proportion", xlab = "Price", ylab = "neg_proportion", col = "blue", pch = 20, xaxt = "n")
+axis(1, at = x, labels = x)
+```
+
+
+
+### 1.3.2 Investigating features in different price brackets
+```{r echo=FALSE}
+pos <- c()
+pos_p <- c()
+neg <- c()
+neg_p <- c()
+ws <- c()
+l <- c()
+
+f1 <- features %>%
+  filter(price < 3000000) %>%
+  summarise(pos=mean(num_pos_words), neg=mean(num_neg_words), ws=mean(weighted_sentiment), avg_length=mean(description_length), pos_p = mean(pos_proportion), neg_p=mean(neg_proportion))
+pos <- c(pos, f1$pos)
+neg <- c(neg, f1$neg)
+pos_p <- c(pos_p, f1$pos_p)
+neg_p <- c(neg_p, f1$neg_p)
+ws <- c(ws, f1$ws)
+l <- c(l, f1$avg_length)
+
+f2 <- features %>%
+  filter(price >= 3000000 & price < 6000000) %>%
+  summarise(pos=mean(num_pos_words),neg=mean(num_neg_words), ws = mean(weighted_sentiment),avg_length = mean(description_length), pos_p = mean(pos_proportion), neg_p=mean(neg_proportion))
+pos <- c(pos, f2$pos)
+neg <- c(neg, f2$neg)
+pos_p <- c(pos_p, f2$pos_p)
+neg_p <- c(neg_p, f2$neg_p)
+ws <- c(ws, f2$ws)
+l <- c(l, f2$avg_length)
+
+f3 <- features %>%
+  filter(price >= 6000000 & price < 9000000) %>%
+  summarise(pos=mean(num_pos_words), neg=mean(num_neg_words), ws = mean(weighted_sentiment), avg_length = mean(description_length), pos_p = mean(pos_proportion), neg_p=mean(neg_proportion))
+pos <- c(pos, f3$pos)
+neg <- c(neg, f3$neg)
+pos_p <- c(pos_p, f3$pos_p)
+neg_p <- c(neg_p, f3$neg_p)
+ws <- c(ws, f3$ws)
+l <- c(l, f3$avg_length)
+
+f4 <- features %>%
+  filter(price >= 9000000 & price < 12000000) %>%
+  summarise(pos=mean(num_pos_words), neg=mean(num_neg_words), ws = mean(weighted_sentiment), avg_length = mean(description_length), pos_p = mean(pos_proportion), neg_p=mean(neg_proportion))
+pos <- c(pos, f4$pos)
+neg <- c(neg, f4$neg)
+pos_p <- c(pos_p, f4$pos_p)
+neg_p <- c(neg_p, f4$neg_p)
+ws <- c(ws, f4$ws)
+l <- c(l, f4$avg_length)
+
+f5 <- features %>%
+  filter(price >= 12000000 & price < 15000000) %>%
+  summarise(pos=mean(num_pos_words), neg=mean(num_neg_words), ws = mean(weighted_sentiment), avg_length = mean(description_length), pos_p = mean(pos_proportion), neg_p=mean(neg_proportion))
+pos <- c(pos, f5$pos)
+neg <- c(neg, f5$neg)
+pos_p <- c(pos_p, f5$pos_p)
+neg_p <- c(neg_p, f5$neg_p)
+ws <- c(ws, f5$ws)
+l <- c(l, f5$avg_length)
+
+f6 <- features %>%
+  filter(price >= 15000000) %>%
+  summarise(pos=mean(num_pos_words), neg=mean(num_neg_words), ws = mean(weighted_sentiment), avg_length = mean(description_length), pos_p = mean(pos_proportion), neg_p=mean(neg_proportion))
+pos <- c(pos, f6$pos)
+neg <- c(neg, f6$neg)
+pos_p <- c(pos_p, f6$pos_p)
+neg_p <- c(neg_p, f6$neg_p)
+ws <- c(ws, f6$ws)
+l <- c(l, f6$avg_length)
+
+features_per_bracket <- tibble(
+  "Price range" = c("< 3m", "3m-6m", "6m-9m", "9m-12m", "12m-15m", "> 15m"),
+  "mean positive words" = pos,
+  "mean negative words" = neg,
+  "mean positive proportion" = pos_p,
+  "mean negative proportion" = neg_p,
+  "mean weighted sentiment" = ws,
+  "mean description length" = l
+)
+```
+
+
+```{r echo=FALSE, caption="Features per price range",render=lemon_print}
+features_per_bracket
+```
+
+
+### 1.3.3 Linear regression using only sentiment features
+```{r echo=FALSE}
+reg_features1 <- features %>%
+  select(-id)
+model1 <- lm(price ~., data = reg_features1)
+
+summary(model1)
+```
+
+```{r echo=FALSE}
+coeffs1 <- coef(model1)
+#coeffs <- abs(coeffs)
+sort(coeffs1, decreasing = TRUE)
+```
+
+
+
+## Linear regression using all features
+```{r echo=FALSE}
+# fixing the data
+reg_features <- inner_join(features, houses1, by = "id")
+reg_features <- reg_features %>% select(-description, -price.y) %>%
+  rename(price = price.x) %>%
+  mutate(bedrooms = as.integer(bedrooms)) %>%
+  mutate(bathrooms = as.integer(bathrooms)) %>%
+  mutate(garages = as.integer(garages)) %>%
+  mutate(parkings = as.integer(parkings)) %>%
+  mutate(erf_size = substr(erf_size, 1, nchar(erf_size) - 2)) %>%
+  mutate(erf_size = gsub(",", "", erf_size)) %>%
+  mutate(erf_size = as.integer(erf_size)) %>%
+  select(-id)
+```
+
+
+```{r echo=FALSE}
+model <- lm(price ~ ., data = reg_features)
+
+# Summarize the model
+summary(model)
+```
+
+
+```{r echo=FALSE}
+coeffs <- coef(model)
+#coeffs <- abs(coeffs)
+sort(coeffs, decreasing = TRUE)
+```
+
+
+
