@@ -3,3 +3,9 @@ The main code for this section can be found in the file DS344_Sentiment_Analysis
 
 # Section 2: Deep Learning
 Creating a neural network that will find the optimal resource allocation scheme needed to reduce loadshedding in South Africa
+
+Each ipynb file name defines what the code does, mainly is exploration on Data and or the different models
+
+The trained model can be found inside final_model
+
+Use source loadshedding_env/bin/activate to activate the env
